@@ -1,0 +1,27 @@
+[binance]
+symbol = "BTCUSDT"
+interval = "1h"
+poll_seconds = 15
+timeout_seconds = 10
+recv_window = 5000
+
+[strategy]
+fast_window = 20
+slow_window = 50
+
+[backtest]
+initial_quote = "10000"
+fee_rate = "0.001"
+slippage_bps = "5"
+
+[risk]
+max_order_quote = "250"
+max_position_pct = "0.25"
+max_daily_loss_quote = "100"
+cooldown_minutes = 0
+
+[storage]
+path = "data/binance_auto.db"
+
+[live]
+enabled = false
