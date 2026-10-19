@@ -14,14 +14,17 @@ from .backtest import BacktestError, BacktestResult, Backtester
 from .binance import BinanceClient, BinanceError
 from .config import AppConfig, ConfigError, load_config
 from .engine import EngineError, TradingEngine
-from .models import Mode
+from .futures import BinanceFuturesClient
+from .futures_backtest import FuturesBacktester
+from .futures_engine import FuturesTradingEngine
+from .models import Market, Mode
 from .rules import RuleViolation, decimal_to_string
 from .storage import Storage
 
 
 app = typer.Typer(
     name="binance-auto",
-    help="Risk-controlled Binance Spot backtesting, paper trading, and automation.",
+    help="Risk-controlled Binance Spot and USD-M Futures automation.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -43,25 +46,46 @@ def _settings(ctx: typer.Context) -> AppConfig:
     return load_config(path, allow_missing=path == DEFAULT_CONFIG)
 
 
-def _credentials(mode: Mode) -> tuple[str | None, str | None]:
-    prefix = "BINANCE_TESTNET" if mode == Mode.TESTNET else "BINANCE"
+def _market(config: AppConfig, override: Market | None) -> Market:
+    return override or Market(config.binance.market)
+
+
+def _credential_prefix(mode: Mode, market: Market) -> str:
+    if mode == Mode.TESTNET:
+        return "BINANCE_FUTURES_TESTNET" if market == Market.FUTURES else "BINANCE_TESTNET"
+    return "BINANCE"
+
+
+def _credentials(mode: Mode, market: Market) -> tuple[str | None, str | None]:
+    prefix = _credential_prefix(mode, market)
     return os.getenv(f"{prefix}_API_KEY"), os.getenv(f"{prefix}_API_SECRET")
 
 
-def _client(config: AppConfig, mode: Mode, *, require_credentials: bool) -> BinanceClient:
+def _client(
+    config: AppConfig, mode: Mode, market: Market, *, require_credentials: bool
+) -> BinanceClient:
     api_key: str | None = None
     api_secret: str | None = None
     if mode != Mode.PAPER:
-        api_key, api_secret = _credentials(mode)
+        api_key, api_secret = _credentials(mode, market)
         if require_credentials and (not api_key or not api_secret):
-            prefix = "BINANCE_TESTNET" if mode == Mode.TESTNET else "BINANCE"
+            prefix = _credential_prefix(mode, market)
             raise ConfigError(
                 f"missing {prefix}_API_KEY or {prefix}_API_SECRET environment variable"
             )
-    base_url = (
-        config.binance.testnet_url if mode == Mode.TESTNET else config.binance.production_url
-    )
-    return BinanceClient(
+    if market == Market.FUTURES:
+        base_url = (
+            config.binance.futures_testnet_url
+            if mode == Mode.TESTNET
+            else config.binance.futures_production_url
+        )
+        client_class = BinanceFuturesClient
+    else:
+        base_url = (
+            config.binance.testnet_url if mode == Mode.TESTNET else config.binance.production_url
+        )
+        client_class = BinanceClient
+    return client_class(
         base_url,
         api_key=api_key,
         api_secret=api_secret,
@@ -136,11 +160,18 @@ def _date_boundary(value: str, *, end: bool = False) -> datetime:
 def doctor(
     ctx: typer.Context,
     mode: Mode = typer.Option(Mode.PAPER, "--mode", "-m"),
+    market: Market | None = typer.Option(None, "--market", help="spot or futures"),
 ) -> None:
     """Validate configuration and connectivity without placing orders."""
     config = _settings(ctx)
-    typer.echo(f"mode={mode.value} symbol={config.binance.symbol} interval={config.binance.interval}")
-    with _client(config, mode, require_credentials=False) as client:
+    selected_market = _market(config, market)
+    typer.echo(
+        f"mode={mode.value} market={selected_market.value} "
+        f"symbol={config.binance.symbol} interval={config.binance.interval}"
+    )
+    with _client(
+        config, mode, selected_market, require_credentials=False
+    ) as client:
         server_time = client.synchronize_time()
         rules = client.get_symbol_rules(config.binance.symbol)
         candles = client.get_recent_closed_klines(
@@ -158,10 +189,21 @@ def doctor(
                 f"close={decimal_to_string(candles[-1].close)}"
             )
         if mode != Mode.PAPER:
-            api_key, api_secret = _credentials(mode)
+            api_key, api_secret = _credentials(mode, selected_market)
             if api_key and api_secret:
-                client.get_account()
-                typer.echo("signed account read: OK (no order placed)")
+                if selected_market == Market.FUTURES and isinstance(
+                    client, BinanceFuturesClient
+                ):
+                    hedge_mode = client.get_position_mode()
+                    state = client.get_account_state(config.binance.symbol)
+                    typer.echo("signed account read: OK (no order placed)")
+                    typer.echo(
+                        f"positionMode={'Hedge' if hedge_mode else 'One-way'} "
+                        f"leverage={state.leverage} marginType={state.margin_type}"
+                    )
+                else:
+                    client.get_account()
+                    typer.echo("signed account read: OK (no order placed)")
             else:
                 typer.echo("signed account read: SKIPPED (credentials not set)")
     typer.echo("configuration and connectivity checks passed")
@@ -174,19 +216,19 @@ def backtest(
     end: str | None = typer.Option(None, "--end", help="UTC date: YYYY-MM-DD"),
     days: int = typer.Option(180, "--days", min=1),
     export: Path | None = typer.Option(None, "--export", help="Write fills to CSV"),
+    market: Market | None = typer.Option(None, "--market", help="spot or futures"),
 ) -> None:
     """Backtest the configured strategy on real Binance public klines."""
     config = _settings(ctx)
-    with _client(config, Mode.PAPER, require_credentials=False) as client:
+    selected_market = _market(config, market)
+    with _client(
+        config, Mode.PAPER, selected_market, require_credentials=False
+    ) as client:
         client.synchronize_time()
         now = datetime.fromtimestamp(client.now_ms() / 1000, timezone.utc)
         end_dt = _date_boundary(end, end=True) if end else now
         end_dt = min(end_dt, now)
-        start_dt = (
-            _date_boundary(start)
-            if start
-            else end_dt - timedelta(days=days)
-        )
+        start_dt = _date_boundary(start) if start else end_dt - timedelta(days=days)
         if start_dt >= end_dt:
             raise ConfigError("backtest start must be earlier than end")
         start_ms = int(start_dt.timestamp() * 1000)
@@ -199,8 +241,16 @@ def backtest(
             end_time=end_ms,
         )
         candles = [candle for candle in candles if candle.close_time < client.now_ms()]
-    typer.echo(f"fetched {len(candles)} closed candles")
-    result = Backtester(config.strategy, config.backtest, config.risk, rules).run(candles)
+    typer.echo(f"fetched {len(candles)} closed {selected_market.value} candles")
+    if selected_market == Market.FUTURES:
+        result = FuturesBacktester(
+            config.strategy, config.backtest, config.risk, config.futures, rules
+        ).run(candles)
+        typer.echo(
+            "futures simulation excludes funding, liquidation, ADL, and maintenance margin changes"
+        )
+    else:
+        result = Backtester(config.strategy, config.backtest, config.risk, rules).run(candles)
     _print_backtest(result, rules.quote_asset, rules.base_asset)
     if export:
         _export_trades(result, export)
@@ -211,16 +261,21 @@ def backtest(
 def run_command(
     ctx: typer.Context,
     mode: Mode = typer.Option(Mode.PAPER, "--mode", "-m"),
+    market: Market | None = typer.Option(None, "--market", help="spot or futures"),
     once: bool = typer.Option(False, "--once", help="Poll once and exit"),
     confirm_live: str | None = typer.Option(
         None, "--confirm-live", help="Required symbol confirmation for real orders"
     ),
 ) -> None:
-    """Run paper, Spot Testnet, or explicitly unlocked live trading."""
+    """Run paper, Testnet, or explicitly unlocked live Spot/Futures trading."""
     config = _settings(ctx)
-    with _client(config, mode, require_credentials=True) as client:
+    selected_market = _market(config, market)
+    with _client(config, mode, selected_market, require_credentials=True) as client:
         with Storage(config.storage.path) as storage:
-            engine = TradingEngine(
+            engine_class = (
+                FuturesTradingEngine if selected_market == Market.FUTURES else TradingEngine
+            )
+            engine = engine_class(
                 config,
                 mode,
                 client,

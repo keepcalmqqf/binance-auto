@@ -34,12 +34,15 @@ def _integer(value: Any, name: str) -> int:
 @dataclass(frozen=True)
 class BinanceConfig:
     symbol: str = "BTCUSDT"
+    market: str = "spot"
     interval: str = "1h"
     poll_seconds: int = 15
     timeout_seconds: float = 10.0
     recv_window: int = 5000
     production_url: str = "https://api.binance.com"
     testnet_url: str = "https://testnet.binance.vision"
+    futures_production_url: str = "https://fapi.binance.com"
+    futures_testnet_url: str = "https://testnet.binancefuture.com"
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,12 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class FuturesConfig:
+    leverage: int = 2
+    margin_type: str = "ISOLATED"
+
+
+@dataclass(frozen=True)
 class StorageConfig:
     path: Path = Path("data/binance_auto.db")
 
@@ -79,12 +88,15 @@ class AppConfig:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    futures: FuturesConfig = field(default_factory=FuturesConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     live: LiveConfig = field(default_factory=LiveConfig)
 
     def validate(self) -> None:
         if not re.fullmatch(r"[A-Z0-9]{5,30}", self.binance.symbol):
             raise ConfigError("binance.symbol must contain 5-30 uppercase letters/digits")
+        if self.binance.market not in {"spot", "futures"}:
+            raise ConfigError("binance.market must be spot or futures")
         intervals = {
             "1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
             "6h", "8h", "12h", "1d", "3d", "1w", "1M",
@@ -117,6 +129,10 @@ class AppConfig:
             raise ConfigError("risk.max_daily_loss_quote must be positive")
         if self.risk.cooldown_minutes < 0:
             raise ConfigError("risk.cooldown_minutes cannot be negative")
+        if not 1 <= self.futures.leverage <= 20:
+            raise ConfigError("futures.leverage must be between 1 and 20")
+        if self.futures.margin_type not in {"ISOLATED", "CROSSED"}:
+            raise ConfigError("futures.margin_type must be ISOLATED or CROSSED")
         if not str(self.storage.path):
             raise ConfigError("storage.path cannot be empty")
 
@@ -138,15 +154,17 @@ def load_config(path: Path, *, allow_missing: bool = False) -> AppConfig:
     s = raw.get("strategy", {})
     bt = raw.get("backtest", {})
     r = raw.get("risk", {})
+    f = raw.get("futures", {})
     st = raw.get("storage", {})
     lv = raw.get("live", {})
-    if not all(isinstance(section, dict) for section in (b, s, bt, r, st, lv)):
+    if not all(isinstance(section, dict) for section in (b, s, bt, r, f, st, lv)):
         raise ConfigError("configuration sections must be TOML tables")
 
     try:
         config = AppConfig(
             binance=BinanceConfig(
                 symbol=str(b.get("symbol", "BTCUSDT")).upper(),
+                market=str(b.get("market", "spot")).lower(),
                 interval=str(b.get("interval", "1h")),
                 poll_seconds=_integer(b.get("poll_seconds", 15), "binance.poll_seconds"),
                 timeout_seconds=float(b.get("timeout_seconds", 10)),
@@ -168,6 +186,10 @@ def load_config(path: Path, *, allow_missing: bool = False) -> AppConfig:
                     r.get("max_daily_loss_quote", "100"), "risk.max_daily_loss_quote"
                 ),
                 cooldown_minutes=_integer(r.get("cooldown_minutes", 0), "risk.cooldown_minutes"),
+            ),
+            futures=FuturesConfig(
+                leverage=_integer(f.get("leverage", 2), "futures.leverage"),
+                margin_type=str(f.get("margin_type", "ISOLATED")).upper(),
             ),
             storage=StorageConfig(path=Path(str(st.get("path", "data/binance_auto.db")))),
             live=LiveConfig(enabled=lv.get("enabled", False)),

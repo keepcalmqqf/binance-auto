@@ -9,6 +9,14 @@ from .models import Fill, Mode, OrderResult, Signal
 from .rules import decimal_to_string
 
 
+def _scope_value(scope: Mode | str) -> str:
+    return scope.value if isinstance(scope, Mode) else scope
+
+
+def _paper_account_key(symbol: str, scope: Mode | str | None) -> str:
+    return symbol if scope is None else f"{_scope_value(scope)}:{symbol}"
+
+
 class Storage:
     def __init__(self, path: Path):
         self.path = path
@@ -106,37 +114,47 @@ class Storage:
                 (key, value),
             )
 
-    def get_paper_quote(self, symbol: str, initial_quote: Decimal) -> Decimal:
+    def get_paper_quote(
+        self, symbol: str, initial_quote: Decimal, *, scope: Mode | str | None = None
+    ) -> Decimal:
+        key = _paper_account_key(symbol, scope)
         row = self._connection.execute(
-            "SELECT quote_balance FROM paper_accounts WHERE symbol = ?", (symbol,)
+            "SELECT quote_balance FROM paper_accounts WHERE symbol = ?", (key,)
         ).fetchone()
         if row is None:
             with self._connection:
                 self._connection.execute(
                     "INSERT INTO paper_accounts(symbol, quote_balance) VALUES(?, ?)",
-                    (symbol, decimal_to_string(initial_quote)),
+                    (key, decimal_to_string(initial_quote)),
                 )
             return initial_quote
         return Decimal(str(row["quote_balance"]))
 
-    def set_paper_quote(self, symbol: str, quote_balance: Decimal) -> None:
+    def set_paper_quote(
+        self,
+        symbol: str,
+        quote_balance: Decimal,
+        *,
+        scope: Mode | str | None = None,
+    ) -> None:
+        key = _paper_account_key(symbol, scope)
         with self._connection:
             self._connection.execute(
                 "UPDATE paper_accounts SET quote_balance = ? WHERE symbol = ?",
-                (decimal_to_string(quote_balance), symbol),
+                (decimal_to_string(quote_balance), key),
             )
 
-    def get_position(self, mode: Mode, symbol: str) -> tuple[Decimal, Decimal]:
+    def get_position(self, mode: Mode | str, symbol: str) -> tuple[Decimal, Decimal]:
         row = self._connection.execute(
             "SELECT base_quantity, cost_basis FROM positions WHERE mode = ? AND symbol = ?",
-            (mode.value, symbol),
+            (_scope_value(mode), symbol),
         ).fetchone()
         if row is None:
             return Decimal(0), Decimal(0)
         return Decimal(str(row["base_quantity"])), Decimal(str(row["cost_basis"]))
 
     def save_position(
-        self, mode: Mode, symbol: str, base_quantity: Decimal, cost_basis: Decimal
+        self, mode: Mode | str, symbol: str, base_quantity: Decimal, cost_basis: Decimal
     ) -> None:
         with self._connection:
             self._connection.execute(
@@ -144,7 +162,7 @@ class Storage:
                 "VALUES(?, ?, ?, ?) ON CONFLICT(mode, symbol) DO UPDATE SET "
                 "base_quantity = excluded.base_quantity, cost_basis = excluded.cost_basis",
                 (
-                    mode.value,
+                    _scope_value(mode),
                     symbol,
                     decimal_to_string(base_quantity),
                     decimal_to_string(cost_basis),
@@ -152,18 +170,18 @@ class Storage:
             )
 
     def daily_start_equity(
-        self, mode: Mode, symbol: str, day: str, current_equity: Decimal
+        self, mode: Mode | str, symbol: str, day: str, current_equity: Decimal
     ) -> Decimal:
         row = self._connection.execute(
             "SELECT start_equity FROM daily_equity WHERE mode = ? AND symbol = ? AND day = ?",
-            (mode.value, symbol, day),
+            (_scope_value(mode), symbol, day),
         ).fetchone()
         if row is None:
             with self._connection:
                 self._connection.execute(
                     "INSERT INTO daily_equity(mode, symbol, day, start_equity) "
                     "VALUES(?, ?, ?, ?)",
-                    (mode.value, symbol, day, decimal_to_string(current_equity)),
+                    (_scope_value(mode), symbol, day, decimal_to_string(current_equity)),
                 )
             return current_equity
         return Decimal(str(row["start_equity"]))
@@ -178,7 +196,7 @@ class Storage:
         *,
         event_key: str,
         client_order_id: str,
-        mode: Mode,
+        mode: Mode | str,
         symbol: str,
         candle_close_time: int,
         side: Signal,
@@ -192,7 +210,7 @@ class Storage:
                 (
                     event_key,
                     client_order_id,
-                    mode.value,
+                    _scope_value(mode),
                     symbol,
                     candle_close_time,
                     side.value,
@@ -209,7 +227,7 @@ class Storage:
                 (status, detail, int(time.time() * 1000), event_key),
             )
 
-    def record_order(self, order: OrderResult, mode: Mode) -> None:
+    def record_order(self, order: OrderResult, mode: Mode | str) -> None:
         with self._connection:
             self._connection.execute(
                 "INSERT INTO orders(" 
@@ -224,7 +242,7 @@ class Storage:
                 (
                     order.client_order_id,
                     order.order_id,
-                    mode.value,
+                    _scope_value(mode),
                     order.symbol,
                     order.side.value,
                     order.status,

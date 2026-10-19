@@ -18,6 +18,11 @@ class Mode(str, Enum):
     LIVE = "live"
 
 
+class Market(str, Enum):
+    SPOT = "spot"
+    FUTURES = "futures"
+
+
 @dataclass(frozen=True)
 class Candle:
     open_time: int
@@ -81,7 +86,9 @@ class OrderResult:
             side=Signal(str(data.get("side", "HOLD"))),
             status=str(data.get("status", "UNKNOWN")),
             executed_quantity=Decimal(str(data.get("executedQty", "0"))),
-            quote_quantity=Decimal(str(data.get("cummulativeQuoteQty", "0"))),
+            quote_quantity=Decimal(
+                str(data.get("cummulativeQuoteQty", data.get("cumQuote", "0")))
+            ),
             transact_time=int(
                 data.get("transactTime", data.get("updateTime", data.get("time", 0)))
             ),

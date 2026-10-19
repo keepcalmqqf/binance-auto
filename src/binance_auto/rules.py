@@ -71,6 +71,40 @@ class SymbolRules:
             max_notional=Decimal(str(notional.get("maxNotional", "0"))),
         )
 
+    @classmethod
+    def from_futures_exchange_info(
+        cls, payload: dict[str, Any], symbol: str
+    ) -> SymbolRules:
+        symbols = payload.get("symbols", [])
+        info = next((item for item in symbols if item.get("symbol") == symbol), None)
+        if info is None:
+            raise RuleViolation(f"contract {symbol} was not returned by exchangeInfo")
+        if info.get("status") != "TRADING" or info.get("contractType") != "PERPETUAL":
+            raise RuleViolation(f"contract {symbol} is not a trading USDT-M perpetual")
+
+        filters = {item.get("filterType"): item for item in info.get("filters", [])}
+        lot = filters.get("LOT_SIZE", {})
+        market_lot = filters.get("MARKET_LOT_SIZE", {})
+        if Decimal(str(market_lot.get("stepSize", "0"))) > 0:
+            lot = market_lot
+        price_filter = filters.get("PRICE_FILTER", {})
+        notional = filters.get("MIN_NOTIONAL", {})
+        return cls(
+            symbol=symbol,
+            base_asset=str(info["baseAsset"]),
+            quote_asset=str(info["quoteAsset"]),
+            base_precision=int(info.get("quantityPrecision", 8)),
+            quote_precision=int(info.get("quotePrecision", 8)),
+            tick_size=Decimal(str(price_filter.get("tickSize", "0"))),
+            min_quantity=Decimal(str(lot.get("minQty", "0"))),
+            max_quantity=Decimal(str(lot.get("maxQty", "0"))),
+            step_size=Decimal(str(lot.get("stepSize", "0"))),
+            min_notional=Decimal(
+                str(notional.get("minNotional", notional.get("notional", "0")))
+            ),
+            max_notional=Decimal(str(notional.get("maxNotional", "0"))),
+        )
+
     def floor_quantity(self, quantity: Decimal) -> Decimal:
         return floor_to_step(quantity, self.step_size)
 
@@ -100,17 +134,20 @@ class SymbolRules:
             if self.max_quantity > 0 and estimated_quantity > self.max_quantity:
                 raise RuleViolation("estimated buy quantity exceeds the symbol maximum")
 
-    def validate_market_sell(self, quantity: Decimal, reference_price: Decimal) -> None:
+    def validate_quantity(self, quantity: Decimal, reference_price: Decimal) -> None:
         if quantity <= 0:
-            raise RuleViolation("sell quantity must be positive")
+            raise RuleViolation("order quantity must be positive")
         if self.min_quantity > 0 and quantity < self.min_quantity:
             raise RuleViolation(
-                f"sell quantity is below minimum {decimal_to_string(self.min_quantity)}"
+                f"order quantity is below minimum {decimal_to_string(self.min_quantity)}"
             )
         if self.max_quantity > 0 and quantity > self.max_quantity:
             raise RuleViolation(
-                f"sell quantity exceeds maximum {decimal_to_string(self.max_quantity)}"
+                f"order quantity exceeds maximum {decimal_to_string(self.max_quantity)}"
             )
         if self.step_size > 0 and self.floor_quantity(quantity) != quantity:
-            raise RuleViolation("sell quantity is not aligned to the symbol step size")
+            raise RuleViolation("order quantity is not aligned to the symbol step size")
         self.validate_notional(quantity * reference_price)
+
+    def validate_market_sell(self, quantity: Decimal, reference_price: Decimal) -> None:
+        self.validate_quantity(quantity, reference_price)

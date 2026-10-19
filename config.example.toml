@@ -1,5 +1,6 @@
 [binance]
 symbol = "BTCUSDT"
+market = "spot"
 interval = "1h"
 poll_seconds = 15
 timeout_seconds = 10
@@ -19,6 +20,10 @@ max_order_quote = "250"
 max_position_pct = "0.25"
 max_daily_loss_quote = "100"
 cooldown_minutes = 0
+
+[futures]
+leverage = 2
+margin_type = "ISOLATED"
 
 [storage]
 path = "data/binance_auto.db"
